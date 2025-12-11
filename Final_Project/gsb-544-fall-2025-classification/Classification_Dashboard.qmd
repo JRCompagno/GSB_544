@@ -1,0 +1,222 @@
+---
+title: "Political Affiliation Prediction"
+author: "James Compagno"
+format: 
+  dashboard:
+    theme: flatly
+    orientation: columns
+    embed-resources: true
+---
+
+```{python}
+#| label: setup
+#| include: false
+
+import numpy as np
+import pandas as pd
+import plotnine as p9
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    accuracy_score, confusion_matrix, roc_auc_score,
+    precision_score, recall_score, f1_score
+)
+from sklearn.model_selection import GridSearchCV, cross_val_predict
+from sklearn.pipeline import Pipeline
+import warnings
+import os
+from sklearn.exceptions import ConvergenceWarning
+
+warnings.filterwarnings("ignore", category=ConvergenceWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore")
+os.environ["QUARTO_PYTHON"] = "1"
+```
+
+```{python}
+#| label: load-data
+#| include: false
+
+CAH_train = pd.read_csv("/Users/jamescompagno/Library/CloudStorage/OneDrive-Personal/MSBA/GSB_544/Final_Project/gsb-544-fall-2025-classification/CAH-201803-train.csv")
+CAH_test = pd.read_csv("/Users/jamescompagno/Library/CloudStorage/OneDrive-Personal/MSBA/GSB_544/Final_Project/gsb-544-fall-2025-classification/CAH-201803-test.csv")
+
+X = CAH_train.drop(["id_num", "political_affiliation"], axis=1)
+y = CAH_train["political_affiliation"]
+
+X_test = CAH_test.drop("id_num", axis=1)
+test_ids = CAH_test["id_num"]
+
+numerical_features = ["Q2", "Q15", "Q16", "Q17"] 
+categorical_features = ["Q1", "Q4", "Q5", "Q6", "Q7", "Q8", "Q9", 
+                        "Q10", "Q11", "Q12", "Q13", "Q14", "Q18"]
+
+ct = ColumnTransformer(
+    [
+        ("standardize", StandardScaler(), numerical_features),
+        ("encode", OneHotEncoder(drop='first', sparse_output=False), categorical_features)
+    ],
+    verbose_feature_names_out=False,
+).set_output(transform="pandas")
+```
+
+```{python}
+#| label: train-model
+#| include: false
+
+pipe = Pipeline([
+    ("preprocess", ct),
+    ("logistic", LogisticRegression(solver='saga', max_iter=5000, random_state=67))
+])
+
+param_grid = {
+    'logistic__C': [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10, 100],
+    'logistic__penalty': ['l1', 'l2'],
+    'logistic__class_weight': [None, 'balanced']
+}
+
+grid_search = GridSearchCV(pipe, param_grid, cv=5, scoring='accuracy', n_jobs=-1)
+grid_search.fit(X, y)
+
+best_model = grid_search.best_estimator_
+best_params = grid_search.best_params_
+
+y_pred_cv = cross_val_predict(best_model, X, y, cv=5)
+y_proba_cv = cross_val_predict(best_model, X, y, cv=5, method='predict_proba')
+
+cv_accuracy = accuracy_score(y, y_pred_cv)
+cv_roc_auc = roc_auc_score(y, y_proba_cv, multi_class='ovr', average='weighted')
+cv_precision = precision_score(y, y_pred_cv, average='weighted', zero_division=0)
+cv_recall = recall_score(y, y_pred_cv, average='weighted', zero_division=0)
+cv_f1 = f1_score(y, y_pred_cv, average='weighted', zero_division=0)
+conf_matrix = confusion_matrix(y, y_pred_cv)
+```
+
+# Overview
+
+## Row {height=20%}
+
+```{python}
+#| content: valuebox
+#| title: "CV Accuracy"
+dict(
+    value=f"{cv_accuracy:.1%}",
+    color="success"
+)
+```
+
+```{python}
+#| content: valuebox
+#| title: "CV Percision"
+dict(
+    value=f"{cv_precision:.1%}",
+    color="primary"
+)
+```
+
+```{python}
+#| content: valuebox
+#| title: "ROC AUC"
+dict(
+    value=f"{cv_roc_auc:.3f}",
+    color="info"
+)
+```
+
+```{python}
+#| content: valuebox
+#| title: "F1 Score"
+dict(
+    value=f"{cv_f1:.3f}",
+    color="secondary"
+)
+```
+
+## Row {height=40%}
+
+### Column {width=50%}
+
+```{python}
+#| title: "Target Distribution"
+#| output: true
+
+target_counts = y.value_counts().reset_index()
+target_counts.columns = ['Political_Affiliation', 'Count']
+
+(p9.ggplot(target_counts, p9.aes(x='Political_Affiliation', y='Count', fill='Political_Affiliation'))
+    + p9.geom_col(width=0.6)
+    + p9.geom_text(p9.aes(label='Count'), va='bottom', size=10)
+    + p9.labs(x='', y='Count')
+    + p9.theme(figure_size=(5, 4))
+    + p9.theme(
+        panel_background=p9.element_rect(fill="white"), 
+        panel_grid_major=p9.element_line(color="#f2f7f8", size=0.5),
+        legend_position='none'
+    )
+    + p9.scale_fill_manual(values={"Democrat":"#3498db", "Republican":"#e74c3c", "Independent":"#2ecc71"})
+).draw()
+```
+
+### Column {width=50%}
+
+```{python}
+#| title: "Confusion Matrix"
+#| output: true
+
+classes = sorted(y.unique())
+cm_df = pd.DataFrame(conf_matrix, index=classes, columns=classes)
+
+cm_long = cm_df.reset_index().melt(id_vars='index', var_name='Predicted', value_name='Count')
+cm_long.columns = ['Actual', 'Predicted', 'Count']
+
+(p9.ggplot(cm_long, p9.aes(x='Predicted', y='Actual', fill='Count'))
+    + p9.geom_tile(color='white', size=2)
+    + p9.geom_text(p9.aes(label='Count'), size=12, color='white')
+    + p9.scale_fill_gradient(low='#3498db', high='#2c3e50')
+    + p9.labs(x='Predicted', y='Actual')
+    + p9.theme(figure_size=(5, 4))
+    + p9.theme(
+        panel_background=p9.element_rect(fill="white"), 
+        panel_grid_major=p9.element_line(color="#f2f7f8", size=0.5),
+        legend_position='none'
+    )
+).draw()
+```
+
+## Row {height=40%}
+
+### Column {width=50%}
+
+**Model Summary**
+
+- Logistic Regression with L1/L2 regularization
+- 5-fold cross-validation for robust evaluation
+- Multi-class classification (Democrat, Republican, Independent)
+
+**Best Parameters Found**
+
+- Regularization strength (C) and penalty type optimized via grid search
+- Class weighting considered to handle any imbalance
+
+**Business Takeaways**
+
+- Model achieves ~62.1% accuracy in predicting political affiliation from survey responses
+- The final model had the highest accuracy and Roc Auc of all 16 different Corss-Validated Models
+- The model predicts Independents best with 30 correct classifications, and Democrats worst with only 5 correct classifications.
+
+### Column {width=50%}
+
+```{python}
+#| title: "Best Hyperparameters"
+
+params_df = pd.DataFrame({
+    'Parameter': ['C (Regularization)', 'Penalty', 'Class Weight'],
+    'Best Value': [
+        best_params['logistic__C'],
+        best_params['logistic__penalty'],
+        str(best_params['logistic__class_weight'])
+    ]
+})
+
+params_df
+```
